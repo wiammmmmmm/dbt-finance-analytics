@@ -1,0 +1,11 @@
+version: 2
+
+sources:
+  - name: olist
+    database: finance_raw
+    schema: olist
+
+    tables:
+      - name: customers
+      - name: orders
+      - name: payments

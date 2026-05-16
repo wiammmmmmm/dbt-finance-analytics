@@ -1,0 +1,218 @@
+version: 2
+
+models:
+
+  - name: dim_customers
+    description: >
+      One row per unique customer (customer_unique_id). Aggregates order history
+      from stg_olist__orders and resolves address to the most recent order.
+      Use customer_unique_id for retention and LTV analysis.
+      Do NOT use this model for order-level joins — use fct_orders instead.
+    config:
+      materialized: table
+      tags: ['gold', 'marketing']
+      meta:
+        owner: 'analytics'
+        grain: 'customer_unique_id'
+    columns:
+      - name: customer_unique_id
+        description: Stable identifier representing a real person across all orders.
+        tests:
+          - not_null
+          - unique
+
+      - name: customer_zip_code_prefix
+        description: Five-digit ZIP code from the customer's most recent order.
+        tests:
+          - not_null
+
+      - name: customer_city
+        description: City from the customer's most recent order, lowercased and trimmed.
+        tests:
+          - not_null
+
+      - name: customer_state
+        description: Brazilian state from the customer's most recent order, uppercased.
+        tests:
+          - not_null
+          - accepted_values:
+              arguments:
+                values: ['AC','AL','AP','AM','BA','CE','DF','ES','GO','MA','MT',
+                         'MS','MG','PA','PB','PR','PE','PI','RJ','RN','RS','RO',
+                         'RR','SC','SP','SE','TO']
+          
+
+      - name: total_orders
+        description: Total number of orders placed by this customer.
+        tests:
+          - not_null
+
+      - name: first_order_date
+        description: Timestamp of the customer's first order.
+        tests:
+          - not_null
+
+      - name: last_order_date
+        description: Timestamp of the customer's most recent order.
+        tests:
+          - not_null
+
+      - name: is_repeat_customer
+        description: True when the customer placed more than one order.
+        tests:
+          - not_null
+          - accepted_values:
+              arguments:
+                values: [true, false]
+
+
+  - name: fct_orders
+    description: >
+      One row per order. Payment data is aggregated from stg_olist__payments
+      before joining, preventing fanout. All data quality flags from staging
+      are preserved so BI consumers can filter as needed.
+      Do NOT aggregate revenue from this model without filtering
+      has_invalid_payment = false first.
+    config:
+      materialized: table
+      tags: ['gold', 'finance']
+      meta:
+        owner: 'analytics'
+        grain: 'order_id'
+    columns:
+      - name: order_id
+        description: Unique order identifier. Primary key of this model.
+        tests:
+          - not_null
+          - unique
+
+      - name: customer_id
+        description: Order-scoped customer identifier. Use for joins back to staging only.
+        tests:
+          - not_null
+
+      - name: customer_unique_id
+        description: Person-level customer identifier. Use for customer-level analysis.
+        tests:
+          - not_null
+          - relationships:
+              arguments:
+                to: ref('dim_customers')
+                field: customer_unique_id
+
+      - name: order_status
+        description: Lowercased order lifecycle status.
+        tests:
+          - not_null
+          - accepted_values:
+              arguments:
+                values: ['delivered', 'shipped', 'canceled', 'invoiced',
+                         'processing', 'created', 'approved', 'unavailable']
+
+      - name: order_purchase_timestamp
+        description: Timestamp when the order was placed.
+        tests:
+          - not_null
+
+      - name: days_to_deliver
+        description: Days between purchase and customer delivery. NULL for undelivered orders.
+
+      - name: total_payment_amount
+        description: >
+          Sum of all valid payment values on this order.
+          Zero-value vouchers are included here — filter has_invalid_payment
+          for clean revenue aggregations.
+        tests:
+          - not_null
+          - dbt_utils.accepted_range:
+              arguments:
+                min_value: 0
+                inclusive: true
+
+      - name: payment_type_primary
+        description: Payment method with the highest payment value on this order.
+
+      - name: has_installments
+        description: True when at least one payment on this order used installments.
+        tests:
+          - not_null
+          - accepted_values:
+              arguments:
+                values: [true, false]
+
+      - name: is_date_sequence_valid
+        description: >
+          False when order timestamps occur out of logical sequence.
+          Inherited from stg_olist__orders. Filter to true for delivery time analysis.
+        tests:
+          - not_null
+          - accepted_values:
+              arguments:
+                values: [true, false]
+
+      - name: is_null_delivery_consistent
+        description: >
+          False when a delivery timestamp is null but the order status implies
+          it should be populated. Inherited from stg_olist__orders.
+        tests:
+          - not_null
+          - accepted_values:
+              arguments:
+                values: [true, false]
+
+      - name: has_invalid_payment
+        description: >
+          True when at least one payment on this order failed the
+          is_payment_value_valid check in staging. Exclude these rows
+          from any revenue aggregation.
+        tests:
+          - not_null
+          - accepted_values:
+              arguments:
+                values: [true, false]
+
+  - name: fct_monthly_revenue
+    description: >
+      One row per calendar month. Revenue is calculated from valid, non-zero
+      payments only — invalid payments and zero-value vouchers are excluded
+      at the source. Safe to use for financial reporting without additional filtering.
+    config:
+      materialized: table
+      tags: ['gold', 'finance']
+      meta:
+        owner: 'analytics'
+        grain: 'order_month'
+    columns:
+      - name: order_month
+        description: First day of the calendar month (date_trunc month).
+        tests:
+          - not_null
+          - unique
+
+      - name: total_orders
+        description: Count of distinct orders with at least one valid payment this month.
+        tests:
+          - not_null
+
+      - name: total_revenue
+        description: Sum of all valid payment values this month.
+        tests:
+          - not_null
+          - dbt_utils.accepted_range:
+              arguments:
+                min_value: 0
+                inclusive: false
+
+      - name: avg_order_value
+        description: Total revenue divided by total orders. Pre-calculated for BI convenience.
+        tests:
+          - not_null
+
+      - name: pct_credit_card
+        description: Share of revenue paid by credit card (0–100).
+      - name: pct_boleto
+        description: Share of revenue paid by boleto (0–100).
+      - name: pct_voucher
+        description: Share of revenue paid by voucher (0–100).
+      - name: pct_debit_card
+        description: Share of revenue paid by debit card (0–100).

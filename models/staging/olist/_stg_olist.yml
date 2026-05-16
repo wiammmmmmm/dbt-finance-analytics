@@ -1,0 +1,106 @@
+version: 2
+
+models:
+  - name: stg_olist__customers
+    description: Cleaned customer records from the Olist source.
+    columns:
+      - name: customer_id
+        description: Customer identifier used for order-level joins.
+        tests:
+          - not_null
+          - unique
+      - name: customer_unique_id
+        description: Stable customer identifier representing a person across orders.
+        tests:
+          - not_null
+      - name: customer_zip_code_prefix
+        description: Five-digit customer ZIP code, left-padded to preserve leading zeros.
+      - name: customer_city
+        description: Customer city normalized to lowercase and trimmed.
+      - name: customer_state
+        description: Customer state normalized to uppercase and trimmed.
+
+  - name: stg_olist__orders
+    description: Cleaned Olist orders with delivery timing and data quality flags.
+    columns:
+      - name: order_id
+        description: Unique order identifier.
+        tests:
+          - not_null
+          - unique
+      - name: customer_id
+        description: Customer identifier associated with the order.
+        tests:
+          - not_null
+          - relationships:
+              arguments:
+                to: ref('stg_olist__customers')
+                field: customer_id
+      - name: order_status
+        description: Lowercased order lifecycle status.
+        tests:
+          - accepted_values:
+              arguments:
+                values: ['delivered', 'shipped', 'canceled', 'invoiced',
+                         'processing', 'created', 'approved', 'unavailable']
+      - name: order_purchase_timestamp
+        description: Timestamp when the order was placed.
+        tests:
+          - not_null
+      - name: order_approved_at
+        description: Timestamp when the order was approved.
+      - name: order_delivered_carrier_date
+        description: Timestamp when the order was handed off to the carrier.
+      - name: order_delivered_customer_date
+        description: Timestamp when the order was delivered to the customer.
+      - name: order_estimated_delivery_date
+        description: Estimated delivery timestamp provided at purchase time.
+      - name: days_to_deliver
+        description: Number of days between purchase and customer delivery.
+      - name: is_date_sequence_valid
+        description: True when timestamps occur in a valid sequence.
+      - name: is_null_delivery_consistent
+        description: True when null delivery timestamps are consistent with order status.
+
+  - name: stg_olist__payments
+    description: Cleaned Olist payments with normalized types and quality flags.
+    tests:
+      - dbt_utils.unique_combination_of_columns:
+          arguments:
+            combination_of_columns:
+              - order_id
+              - payment_sequential
+    columns:
+      - name: order_id
+        description: Order identifier associated with the payment.
+        tests:
+          - not_null
+          - relationships:
+              arguments:
+                to: ref('stg_olist__orders')
+                field: order_id
+      - name: payment_sequential
+        description: Sequence number for the payment within an order.
+        tests:
+          - not_null
+      - name: payment_type
+        description: Payment method, with not_defined reclassified to unknown.
+        tests:
+          - not_null
+          - accepted_values:
+              arguments:
+                values: ['credit_card', 'boleto', 'voucher', 'debit_card', 'unknown']
+      - name: payment_installments
+        description: Number of installments used for the payment.
+        tests:
+          - not_null
+          - dbt_utils.accepted_range:
+              arguments:
+                min_value: 0
+                max_value: 24
+      - name: payment_value
+        description: Monetary value of the payment.
+        tests:
+          - not_null
+      - name: is_payment_value_valid
+        description: True when payment_value follows business rules.
